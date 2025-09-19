@@ -1,31 +1,38 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { useOnlineUsers } from '../hooks/useOnlineUsers'
 import { supabase } from '../utils/supabase'
-import { Send, Image as ImageIcon, LogOut, Sun, Moon, Users, Trash2, X, Download, User } from 'lucide-react'
+import { Send, Image as ImageIcon, Sun, Moon, Users, Trash2, X, Download, User, ArrowLeft, RefreshCw } from 'lucide-react'
 
 const Chat = () => {
   const [messages, setMessages] = useState([])
   const [newMessage, setNewMessage] = useState('')
-  const [onlineUsers, setOnlineUsers] = useState([])
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [isOnlineUsersModalOpen, setIsOnlineUsersModalOpen] = useState(false)
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, message: null })
   const [longPressTimer, setLongPressTimer] = useState(null)
   const [isInitialized, setIsInitialized] = useState(false)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
-  const userAddedToOnline = useRef(false)
   
-  const { user, signOut } = useAuth()
+  const navigate = useNavigate()
+  const { user } = useAuth()
   const { isDark, toggleTheme } = useTheme()
+  
+  const { onlineUsers, isConnected, refreshOnlineUsers } = useOnlineUsers(user?.id)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
   useEffect(() => {
-    scrollToBottom()
+    // Add a small delay to ensure DOM is updated
+    setTimeout(() => {
+      scrollToBottom()
+    }, 100)
   }, [messages])
 
   // Mark component as initialized after first render
@@ -33,10 +40,6 @@ const Chat = () => {
     setIsInitialized(true)
   }, [])
 
-  // Reset user added flag when user changes
-  useEffect(() => {
-    userAddedToOnline.current = false
-  }, [user?.id])
 
   // Initialize database tables
   useEffect(() => {
@@ -92,95 +95,81 @@ const Chat = () => {
 
   // Subscribe to messages
   useEffect(() => {
+    if (!user?.id) return
+    
     console.log('Setting up message subscription for user:', user.id)
     
     const channel = supabase
-      .channel('messages')
+      .channel('messages', {
+        config: {
+          broadcast: { self: false },
+          presence: { key: user.id }
+        }
+      })
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
+        { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'messages',
+          filter: '*'
+        },
         (payload) => {
           console.log('INSERT event received:', payload)
+          console.log('New message from user:', payload.new.user_id, 'Current user:', user.id)
+          
           setMessages(prev => {
-            // Only add messages from other users to avoid duplicates
-            // Current user's messages are already handled in the send functions
-            if (payload.new.user_id !== user.id) {
-              return [...prev, payload.new]
+            // Check if message already exists to prevent duplicates
+            const messageExists = prev.some(msg => msg.id === payload.new.id)
+            if (messageExists) {
+              console.log('Message already exists, skipping')
+              return prev
             }
-            return prev
+            
+            // Add ALL messages (including from current user) to ensure real-time updates
+            // This handles cases where the subscription might miss the user's own messages
+            console.log('Adding new message to state')
+            return [...prev, { ...payload.new, status: 'received' }]
           })
         }
       )
       .on(
         'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'messages' },
+        { 
+          event: 'DELETE', 
+          schema: 'public', 
+          table: 'messages',
+          filter: '*'
+        },
         (payload) => {
           console.log('DELETE event received:', payload)
-          setMessages(prev => prev.filter(msg => msg.id !== payload.old.id))
+          console.log('Deleting message with ID:', payload.old.id)
+          setMessages(prev => {
+            const filteredMessages = prev.filter(msg => msg.id !== payload.old.id)
+            console.log('Messages after deletion:', filteredMessages.length, 'remaining')
+            return filteredMessages
+          })
         }
       )
       .subscribe((status) => {
         console.log('Message subscription status:', status)
+        if (status === 'SUBSCRIBED') {
+          console.log('Successfully subscribed to message updates')
+        } else if (status === 'CHANNEL_ERROR') {
+          console.error('Error subscribing to messages')
+        } else if (status === 'TIMED_OUT') {
+          console.error('Subscription timed out, retrying...')
+        } else if (status === 'CLOSED') {
+          console.log('Subscription closed')
+        }
       })
 
     return () => {
       console.log('Removing message subscription')
       supabase.removeChannel(channel)
     }
-  }, [user.id])
+  }, [user?.id])
 
-  // Subscribe to online users
-  useEffect(() => {
-    const channel = supabase
-      .channel('online_users')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'online_users' },
-        (payload) => {
-          if (payload.eventType === 'INSERT') {
-            setOnlineUsers(prev => [...prev, payload.new])
-          } else if (payload.eventType === 'DELETE') {
-            setOnlineUsers(prev => prev.filter(user => user.id !== payload.old.id))
-          }
-        }
-      )
-      .subscribe()
-
-    // Add current user to online users only once
-    const addUserToOnline = async () => {
-      if (userAddedToOnline.current) return
-      
-      const { error } = await supabase
-        .from('online_users')
-        .upsert({
-          id: user.id,
-          email: user.email,
-          full_name: user.user_metadata?.full_name || user.email.split('@')[0],
-          last_seen: new Date().toISOString()
-        })
-      
-      if (error) {
-        console.error('Error adding user to online list:', error)
-      } else {
-        userAddedToOnline.current = true
-      }
-    }
-
-    addUserToOnline()
-
-    // Remove user from online users when component unmounts
-    return () => {
-      supabase.removeChannel(channel)
-      const removeUserFromOnline = async () => {
-        await supabase
-          .from('online_users')
-          .delete()
-          .eq('id', user.id)
-        userAddedToOnline.current = false
-      }
-      removeUserFromOnline()
-    }
-  }, [user])
 
   // Load initial messages
   useEffect(() => {
@@ -204,23 +193,50 @@ const Chat = () => {
     loadMessages()
   }, [isInitialized])
 
-  // Load initial online users
+  // Fallback: Poll for new messages every 5 seconds as backup
   useEffect(() => {
-    const loadOnlineUsers = async () => {
+    if (!user?.id) return
+
+    const pollMessages = async () => {
       const { data, error } = await supabase
-        .from('online_users')
+        .from('messages')
         .select('*')
-        .order('last_seen', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(50) // Get more messages to catch deletions
       
-      if (error) {
-        console.error('Error loading online users:', error)
-      } else {
-        setOnlineUsers(data || [])
+      if (!error && data) {
+        setMessages(prev => {
+          // Get current message IDs
+          const currentIds = new Set(prev.map(msg => msg.id))
+          const newIds = new Set(data.map(msg => msg.id))
+          
+          // Find new messages to add
+          const newMessages = data.filter(msg => !currentIds.has(msg.id))
+          
+          // Find messages to remove (deleted from database)
+          const messagesToRemove = prev.filter(msg => !newIds.has(msg.id))
+          
+          if (newMessages.length > 0) {
+            console.log('Polling found new messages:', newMessages.length)
+          }
+          
+          if (messagesToRemove.length > 0) {
+            console.log('Polling found deleted messages:', messagesToRemove.length)
+          }
+          
+          // Return updated messages: remove deleted ones and add new ones
+          const filteredMessages = prev.filter(msg => newIds.has(msg.id))
+          return [...filteredMessages, ...newMessages.map(msg => ({ ...msg, status: 'received' }))]
+        })
       }
     }
 
-    loadOnlineUsers()
-  }, [])
+    // Poll every 5 seconds
+    const interval = setInterval(pollMessages, 5000)
+    
+    return () => clearInterval(interval)
+  }, [user?.id])
+
 
   const handleSendMessage = async (e) => {
     e.preventDefault()
@@ -238,10 +254,11 @@ const Chat = () => {
       user_name: userName,
       message_type: 'text',
       created_at: new Date().toISOString(),
-      isTemporary: true
+      isTemporary: true,
+      status: 'sending'
     }
 
-    // Add message to local state immediately
+    // Add message to local state immediately for instant feedback
     setMessages(prev => [...prev, tempMessage])
     setNewMessage('')
 
@@ -261,20 +278,44 @@ const Chat = () => {
 
       if (error) {
         console.error('Error sending message:', error)
-        // Remove temporary message on error
-        setMessages(prev => prev.filter(msg => msg.id !== tempMessage.id))
+        // Update temporary message to show error state
+        setMessages(prev => 
+          prev.map(msg => 
+            msg.id === tempMessage.id 
+              ? { ...msg, status: 'error', isTemporary: false }
+              : msg
+          )
+        )
+        
+        // Show error message to user
+        setTimeout(() => {
+          setMessages(prev => prev.filter(msg => msg.id !== tempMessage.id))
+        }, 3000)
       } else if (data) {
         // Replace temporary message with real message immediately
         setMessages(prev => 
           prev.map(msg => 
-            msg.id === tempMessage.id ? { ...data, isTemporary: false } : msg
+            msg.id === tempMessage.id 
+              ? { ...data, isTemporary: false, status: 'sent' }
+              : msg
           )
         )
       }
     } catch (error) {
       console.error('Error sending message:', error)
-      // Remove temporary message on error
-      setMessages(prev => prev.filter(msg => msg.id !== tempMessage.id))
+      // Update temporary message to show error state
+      setMessages(prev => 
+        prev.map(msg => 
+          msg.id === tempMessage.id 
+            ? { ...msg, status: 'error', isTemporary: false }
+            : msg
+        )
+      )
+      
+      // Show error message to user
+      setTimeout(() => {
+        setMessages(prev => prev.filter(msg => msg.id !== tempMessage.id))
+      }, 3000)
     }
   }
 
@@ -305,7 +346,8 @@ const Chat = () => {
       user_name: userName,
       message_type: 'image',
       created_at: new Date().toISOString(),
-      isTemporary: true
+      isTemporary: true,
+      status: 'sending'
     }
 
     // Add message to local state immediately
@@ -353,7 +395,7 @@ const Chat = () => {
         // Replace temporary message with real message immediately
         setMessages(prev => 
           prev.map(msg => 
-            msg.id === tempMessage.id ? { ...data, isTemporary: false } : msg
+            msg.id === tempMessage.id ? { ...data, isTemporary: false, status: 'sent' } : msg
           )
         )
       }
@@ -367,9 +409,6 @@ const Chat = () => {
     e.target.value = ''
   }
 
-  const handleSignOut = async () => {
-    await signOut()
-  }
 
   const formatTime = (timestamp) => {
     return new Date(timestamp).toLocaleTimeString([], { 
@@ -539,6 +578,51 @@ const Chat = () => {
     }
   }
 
+  const handleRefreshMessages = async () => {
+    setIsRefreshing(true)
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .order('created_at', { ascending: true })
+      
+      if (error) {
+        console.error('Error refreshing messages:', error)
+      } else {
+        console.log('Refreshed messages:', data?.length || 0, 'messages')
+        // Update messages with proper status
+        const messagesWithStatus = (data || []).map(msg => ({ ...msg, status: 'received' }))
+        setMessages(messagesWithStatus)
+      }
+      
+      // Also refresh online users
+      await refreshOnlineUsers()
+    } catch (error) {
+      console.error('Error refreshing messages:', error)
+    } finally {
+      setIsRefreshing(false)
+    }
+  }
+
+  // Add error boundary
+  if (!user) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+            Please log in to access the chat
+          </h2>
+          <button
+            onClick={() => navigate('/login')}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+          >
+            Go to Login
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="h-screen flex bg-gray-50 dark:bg-gray-900">
       {/* Sidebar - Desktop only */}
@@ -564,16 +648,21 @@ const Chat = () => {
               key={onlineUser.id}
               className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
             >
-              <div className="w-8 h-8 bg-primary-500 rounded-full flex items-center justify-center text-white text-sm font-medium">
-                {onlineUser.full_name?.charAt(0) || onlineUser.email?.charAt(0)}
+              <div className="relative">
+                <div className="w-8 h-8 bg-primary-500 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                  {onlineUser.full_name?.charAt(0) || onlineUser.email?.charAt(0)}
+                </div>
+                {/* Green online indicator */}
+                <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></div>
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
                   {onlineUser.full_name || onlineUser.email}
                 </p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
+                <div className="text-xs text-green-600 dark:text-green-400 flex items-center">
+                  <div className="w-2 h-2 bg-green-500 rounded-full mr-1"></div>
                   Online
-                </p>
+                </div>
               </div>
             </div>
           ))}
@@ -585,29 +674,47 @@ const Chat = () => {
         {/* Header */}
         <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 p-4">
           <div className="flex items-center justify-between">
+            {/* Left side - Back button */}
             <div className="flex items-center space-x-3">
+              <button
+                onClick={() => navigate('/dashboard')}
+                className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                title="Back to Dashboard"
+              >
+                <ArrowLeft size={20} />
+              </button>
               <button
                 onClick={() => setIsOnlineUsersModalOpen(true)}
                 className="lg:hidden p-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                title="Online Users"
               >
                 <User size={20} />
               </button>
+            </div>
+            
+            {/* Center - Title */}
+            <div className="flex-1 text-center">
               <h1 className="text-xl font-semibold text-gray-900 dark:text-white">
                 Edu Share Chat
               </h1>
             </div>
+            
+            {/* Right side - Theme toggle, Refresh, and Profile icon */}
             <div className="flex items-center space-x-2">
+              <button
+                onClick={handleRefreshMessages}
+                disabled={isRefreshing}
+                className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors disabled:opacity-50"
+                title="Refresh Messages"
+              >
+                <RefreshCw size={20} className={isRefreshing ? 'animate-spin' : ''} />
+              </button>
               <button
                 onClick={toggleTheme}
                 className="p-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
               >
                 {isDark ? <Sun size={20} /> : <Moon size={20} />}
-              </button>
-              <button
-                onClick={handleSignOut}
-                className="p-2 rounded-lg bg-red-100 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/40 transition-colors"
-              >
-                <LogOut size={20} />
               </button>
             </div>
           </div>
@@ -615,10 +722,21 @@ const Chat = () => {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {/* Message Deletion Hint */}
+          {/* Real-time Status and Message Deletion Hint */}
           <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-4">
             <p className="text-sm text-blue-700 dark:text-blue-300 text-center">
-              💡 All messages are deleted after one week.
+              💡 All messages are deleted after one week. Messages appear in real-time for all users.
+            </p>
+            <p className="text-xs text-blue-600 dark:text-blue-400 text-center mt-1">
+              {isConnected ? (
+                <span className="text-green-600 dark:text-green-400">
+                  🟢 Real-time messaging is active
+                </span>
+              ) : (
+                <span className="text-yellow-600 dark:text-yellow-400">
+                  🟡 Real-time connecting... Messages will sync every 5 seconds as backup
+                </span>
+              )}
             </p>
           </div>
           {messages.map((message) => (
@@ -633,7 +751,9 @@ const Chat = () => {
                     : message.message_type === 'image'
                     ? 'message-received cursor-pointer hover:scale-105'
                     : 'message-received'
-                } ${message.isTemporary ? 'opacity-70' : ''}`}
+                } ${message.isTemporary ? 'opacity-70' : ''} ${
+                  message.message_type === 'image' ? 'p-2' : ''
+                }`}
                 onMouseDown={() => handleLongPressStart(message)}
                 onMouseUp={handleLongPressEnd}
                 onMouseLeave={handleLongPressEnd}
@@ -649,28 +769,41 @@ const Chat = () => {
                 }
               >
                 {message.message_type === 'image' ? (
-                  <div>
+                  <div className="mb-2">
                     <img
                       src={message.content}
                       alt="Shared image"
-                      className="max-w-xs rounded-lg"
+                      className="max-w-full max-h-64 rounded-lg object-cover cursor-pointer"
+                      style={{ maxWidth: '280px' }}
                       onError={(e) => {
                         e.target.style.display = 'none'
                         e.target.nextSibling.style.display = 'block'
                       }}
+                      onClick={() => window.open(message.content, '_blank')}
                     />
-                    <div style={{ display: 'none' }} className="text-sm">
+                    <div style={{ display: 'none' }} className="text-sm text-gray-500 dark:text-gray-400 p-2 bg-gray-100 dark:bg-gray-700 rounded">
                       Image failed to load
                     </div>
                   </div>
                 ) : (
                   <p className="text-sm">{message.content}</p>
                 )}
-                <div className="text-xs opacity-70 mt-1 flex items-center">
-                  {message.user_name} • {formatTime(message.created_at)}
-                  {message.isTemporary && (
-                    <span className="ml-2 text-xs">Sending...</span>
-                  )}
+                <div className="text-xs opacity-70 mt-1 flex items-center justify-between">
+                  <span>
+                    {message.user_name} • {formatTime(message.created_at)}
+                  </span>
+                  <div className="flex items-center space-x-1">
+                    {message.isTemporary && message.status === 'sending' && (
+                      <span className="text-xs text-blue-500 animate-pulse">Sending...</span>
+                    )}
+                    {message.status === 'error' && (
+                      <span className="text-xs text-red-500">Failed</span>
+                    )}
+                    {message.status === 'sent' && (
+                      <span className="text-xs text-green-500">✓</span>
+                    )}
+                    {/* Removed checkmark for received messages */}
+                  </div>
                 </div>
               </div>
             </div>
@@ -699,8 +832,14 @@ const Chat = () => {
               type="text"
               value={newMessage}
               onChange={(e) => setNewMessage(e.target.value)}
+              onKeyPress={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  handleSendMessage(e)
+                }
+              }}
               placeholder="Type your message..."
-              className="flex-1 input-field"
+              className="flex-1 input-field focus:ring-2 focus:ring-primary-500 focus:border-transparent"
             />
             <button
               type="submit"
@@ -710,6 +849,10 @@ const Chat = () => {
               <Send size={20} />
             </button>
           </form>
+          {/* Hint text - only visible on desktop */}
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 text-center hidden sm:block">
+            Press Enter to send
+          </p>
         </div>
       </div>
 
@@ -839,16 +982,21 @@ const Chat = () => {
                     key={onlineUser.id}
                     className="flex items-center space-x-3 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
                   >
-                    <div className="w-8 h-8 bg-primary-500 rounded-full flex items-center justify-center text-white text-sm font-medium">
-                      {onlineUser.full_name?.charAt(0) || onlineUser.email?.charAt(0)}
+                    <div className="relative">
+                      <div className="w-8 h-8 bg-primary-500 rounded-full flex items-center justify-center text-white text-sm font-medium">
+                        {onlineUser.full_name?.charAt(0) || onlineUser.email?.charAt(0)}
+                      </div>
+                      {/* Green online indicator */}
+                      <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 border-2 border-white dark:border-gray-800 rounded-full"></div>
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900 dark:text-white truncate">
                         {onlineUser.full_name || onlineUser.email}
                       </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                      <div className="text-xs text-green-600 dark:text-green-400 flex items-center">
+                        <div className="w-2 h-2 bg-green-500 rounded-full mr-1"></div>
                         Online
-                      </p>
+                      </div>
                     </div>
                   </div>
                 ))

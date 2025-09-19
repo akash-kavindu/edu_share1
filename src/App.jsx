@@ -4,7 +4,15 @@ import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ThemeProvider } from './contexts/ThemeContext'
 import Login from './pages/Login'
 import SignUp from './pages/SignUp'
+import Dashboard from './pages/Dashboard'
 import Chat from './pages/Chat'
+import PapersPage from './pages/Papers'
+import UsersPage from './pages/Users'
+import ProfilePage from './pages/Profile'
+import Calendar from './pages/Calendar'
+import SecurityPage from './pages/Security'
+import NotificationsPage from './pages/Notifications'
+import HelpPage from './pages/Help'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth()
@@ -30,6 +38,14 @@ function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<SignUp />} />
               <Route 
+                path="/dashboard" 
+                element={
+                  <ProtectedRoute>
+                    <Dashboard />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
                 path="/chat" 
                 element={
                   <ProtectedRoute>
@@ -37,7 +53,63 @@ function App() {
                   </ProtectedRoute>
                 } 
               />
-              <Route path="/" element={<Navigate to="/chat" />} />
+              <Route 
+                path="/papers" 
+                element={
+                  <ProtectedRoute>
+                    <PapersPage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path="/users" 
+                element={
+                  <ProtectedRoute>
+                    <UsersPage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path="/profile" 
+                element={
+                  <ProtectedRoute>
+                    <ProfilePage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path="/calendar" 
+                element={
+                  <ProtectedRoute>
+                    <Calendar />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path="/security" 
+                element={
+                  <ProtectedRoute>
+                    <SecurityPage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path="/notifications" 
+                element={
+                  <ProtectedRoute>
+                    <NotificationsPage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route 
+                path="/help" 
+                element={
+                  <ProtectedRoute>
+                    <HelpPage />
+                  </ProtectedRoute>
+                } 
+              />
+              <Route path="/" element={<Navigate to="/dashboard" />} />
             </Routes>
           </div>
         </Router>

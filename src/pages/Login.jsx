@@ -25,7 +25,7 @@ const Login = () => {
       if (error) {
         setError(error.message)
       } else {
-        navigate('/chat')
+        navigate('/dashboard')
       }
     } catch (err) {
       setError('An unexpected error occurred')
